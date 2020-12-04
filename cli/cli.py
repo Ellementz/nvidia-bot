@@ -1,12 +1,37 @@
-import os
+from datetime import datetime
+from functools import wraps
+from signal import signal, SIGINT
 
 import click
 
 from cli.utils import QuestionaryOption
+from notifications.notifications import NotificationHandler, TIME_FORMAT
 from stores.amazon import Amazon
 from stores.bestbuy import BestBuyHandler
-from stores.evga import Evga
-from stores.nvidia import NvidiaBuyer, GPU_DISPLAY_NAMES, ACCEPTED_LOCALES
+from stores.nvidia import NvidiaBuyer, GPU_DISPLAY_NAMES, CURRENCY_LOCALE_MAP
+from utils import selenium_utils
+from utils.logger import log
+
+notification_handler = NotificationHandler()
+
+
+def handler(signal, frame):
+    log.info("Caught the stop, exiting.")
+    exit(0)
+
+
+def notify_on_crash(func):
+    @wraps(func)
+    def decorator(*args, **kwargs):
+        try:
+            func(*args, **kwargs)
+        except KeyboardInterrupt:
+            pass
+        except:
+            notification_handler.send_notification(f"nvidia-bot has crashed.")
+            raise
+
+    return decorator
 
 
 @click.group()
@@ -23,69 +48,91 @@ def main():
 )
 @click.option(
     "--locale",
-    type=click.Choice(ACCEPTED_LOCALES, case_sensitive=False),
+    type=click.Choice(CURRENCY_LOCALE_MAP.keys(), case_sensitive=False),
     prompt="What locale shall we use?",
     cls=QuestionaryOption,
 )
-def nvidia(gpu, locale):
-    nv = NvidiaBuyer(gpu, locale)
+@click.option("--test", is_flag=True)
+@click.option("--interval", type=int, default=5)
+@notify_on_crash
+def nvidia(gpu, locale, test, interval):
+    nv = NvidiaBuyer(
+        gpu,
+        notification_handler=notification_handler,
+        locale=locale,
+        test=test,
+        interval=interval,
+    )
     nv.run_items()
 
 
 @click.command()
+@click.option("--no-image", is_flag=True, help="Do no load images")
+@click.option("--headless", is_flag=True)
 @click.option(
-    "--amazon_email",
-    type=str,
-    prompt="Amazon Email",
-    default=lambda: os.environ.get("amazon_email", ""),
-    show_default="current user",
+    "--test",
+    is_flag=True,
+    help="Run the checkout flow, but do not actually purchase the item[s]",
 )
 @click.option(
-    "--amazon_password",
-    type=str,
-    prompt="Amazon Password",
-    default=lambda: os.environ.get("amazon_password", ""),
-    show_default="current user",
+    "--delay", type=float, default=3.0, help="Time to wait between checks for item[s]"
 )
 @click.option(
-    "--amazon_item_url",
-    type=str,
-    prompt="Amazon Item URL",
-    default=lambda: os.environ.get("amazon_item_url", ""),
-    show_default="current user",
+    "--checkshipping",
+    is_flag=True,
+    help="Factor shipping costs into reserve price and look for items with a shipping price",
 )
 @click.option(
-    "--amazon_price_limit",
-    type=int,
-    prompt="Maximum Price to Pay",
-    default=lambda: int(os.environ.get("amazon_price_limit", 1000)),
-    show_default="current user",
+    "--detailed",
+    is_flag=True,
+    help="Take more screenshots. !!!!!! This could cause you to miss checkouts !!!!!!",
 )
-def amazon(amazon_email, amazon_password, amazon_item_url, amazon_price_limit):
-    os.environ.setdefault("amazon_email", amazon_email)
-    os.environ.setdefault("amazon_password", amazon_password)
-    os.environ.setdefault("amazon_item_url", amazon_item_url)
-    os.environ.setdefault("amazon_price_limit", str(amazon_price_limit))
+@click.option(
+    "--used",
+    is_flag=True,
+    help="Show used items in search listings.",
+)
+@notify_on_crash
+def amazon(no_image, headless, test, delay, checkshipping, detailed, used):
+    if no_image:
+        selenium_utils.no_amazon_image()
+    else:
+        selenium_utils.yes_amazon_image()
 
-    amzn_obj = Amazon(username=amazon_email, password=amazon_password, debug=True)
-    amzn_obj.run_item(item_url=amazon_item_url, price_limit=amazon_price_limit)
+    amzn_obj = Amazon(
+        headless=headless,
+        notification_handler=notification_handler,
+        checkshipping=checkshipping,
+        detailed=detailed,
+        used=used,
+    )
+    amzn_obj.run_item(delay=delay, test=test)
 
 
 @click.command()
 @click.option("--sku", type=str, required=True)
-def bestbuy(sku):
-    bb = BestBuyHandler(sku)
+@click.option("--headless", is_flag=True)
+@notify_on_crash
+def bestbuy(sku, headless):
+    bb = BestBuyHandler(
+        sku, notification_handler=notification_handler, headless=headless
+    )
     bb.run_item()
 
 
 @click.command()
-@click.option("--test", is_flag=True)
-def evga(test):
-    ev = Evga()
-    ev.buy(test=test)
+def test_notifications():
+    enabled_handlers = ", ".join(notification_handler.get_enabled_handlers())
+    time = datetime.now().strftime(TIME_FORMAT)
+    notification_handler.send_notification(
+        f"Beep boop. This is a test notification from Nvidia bot. Sent {time}."
+    )
+    log.info(f"A notification was sent to the following handlers: {enabled_handlers}")
 
+
+signal(SIGINT, handler)
 
 main.add_command(nvidia)
 main.add_command(amazon)
 main.add_command(bestbuy)
-main.add_command(evga)
+main.add_command(test_notifications)
